@@ -304,13 +304,32 @@ function GF.SetForFrame(frame)
     return nil
 end
 
--- The stack's original slot positions, top to bottom, taken from the
--- snapshots captured before this addon ever touched anything.
+-- The stack's original slot positions, top to bottom.
+--
+-- Normally these come from the snapshots taken before this addon touched
+-- anything, but a snapshot can legitimately be missing: party frames are
+-- hidden until you're actually grouped, and GetLeft/GetTop return nothing on
+-- a hidden frame, so nothing gets recorded for it. A frame with no slot to
+-- go to gets silently skipped by the restack and just sits where it is -
+-- which showed up as the top slot staying empty while everyone below it
+-- stayed put. So fall back to a frame's current position when its snapshot
+-- isn't there, which keeps the slot list complete either way.
 local function SlotsFor(set)
     local slots = {}
     for i = set.lo, set.hi do
-        local snap = GF.knownOriginalPositions[set.prefix .. i]
-        if snap and snap.absolute then table.insert(slots, snap.absolute) end
+        local frameName = set.prefix .. i
+        local snap = GF.knownOriginalPositions[frameName]
+        local slot = snap and snap.absolute
+        if not slot then
+            local frame = getglobal(frameName)
+            -- Skip anything pulled out - its current position is wherever the
+            -- player dragged it to, which is not a stack slot.
+            if frame and frame:IsShown() and not frame.gfPinnedFor then
+                local cap = CaptureOriginalPoint(frame)
+                slot = cap and cap.absolute
+            end
+        end
+        if slot then table.insert(slots, slot) end
     end
     -- Higher y is higher on screen (these are measured up from the bottom).
     table.sort(slots, function(a, b) return a.y > b.y end)
@@ -739,6 +758,25 @@ SlashCmdList["GRAYFATHERSFRAMEROIDS"] = function(msg)
             ", Shagu raid: " .. sh .. "/" .. st ..
             ", pfUI party: " .. pgh .. "/" .. pgt ..
             ", pfUI raid: " .. prh .. "/" .. prt)
+
+        -- Snapshot coverage per set: a set with fewer recorded positions than
+        -- visible frames can't fill every slot when restacking, which shows up
+        -- as the top of the stack staying empty.
+        for _, set in ipairs(GF.FRAME_SETS) do
+            local snaps, shown, pinned = 0, 0, 0
+            for i = set.lo, set.hi do
+                local f = getglobal(set.prefix .. i)
+                if f then
+                    if GF.knownOriginalPositions[set.prefix .. i] then snaps = snaps + 1 end
+                    if f:IsShown() then shown = shown + 1 end
+                    if f.gfPinnedFor then pinned = pinned + 1 end
+                end
+            end
+            if shown > 0 then
+                GF.Say("  " .. set.prefix .. ": " .. shown .. " shown, " .. snaps ..
+                    " with a recorded position, " .. pinned .. " pulled out")
+            end
+        end
     elseif cmd == "debug" then
         GF.debugClicks = not GF.debugClicks
         GF.Say("click debugging: " .. (GF.debugClicks and "|cFF00FF7Fon|r - every click on a hooked frame will print here" or "|cFFFF5179off|r"))
