@@ -1,4 +1,4 @@
-# Grayfather's Frameroids (v1.0.0)
+# Grayfather's Frameroids (v1.0.1)
 
 For tanks and healers: pull a specific party/raid member's **real** unit frame out of whatever raid-frame addon draws it, and pin it anywhere on screen. It's the actual frame - not a copy - so everything about it (health/mana bars, debuffs, click-to-target, right-click menu) works exactly as it always did. Once pinned, it keeps tracking that person by name even if the raid reshuffles them into a different subgroup.
 
@@ -23,7 +23,13 @@ If you're not running either ShaguTweaks-extras or pfUI, only party members (via
 ```
 /gf                 lists everyone currently pulled out
 /gf clear <name>    puts a specific person back
-/gf clear all       puts everyone back
+/gf reset           puts everyone back at once
+/gf probe           diagnostic: frames found vs. frames actually hooked,
+                    per frame type - useful if shift-right-click isn't
+                    doing anything on a frame it should work on
+/gf debug           toggles printing every click seen on a hooked frame
+                    (button + shift state), for tracking down why
+                    shift-right-click isn't registering
 ```
 
 ## Known limitations
