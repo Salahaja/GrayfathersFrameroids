@@ -25,10 +25,21 @@
     case it passes through untouched so native StartMoving() tracking
     still works. This is a per-frame-instance override (only shadows
     SetPoint on that one Lua table), so it can't affect any other frame.
-    Before ever touching it, PinFrame also captures the frame's real,
-    host-assigned position - UnpinFrame explicitly restores exactly that
-    on release, rather than hoping the host's layout code comes back
-    around to it on its own.
+
+    "Original position" (what UnpinFrame restores) is captured as plain
+    absolute numbers relative to UIParent (see CaptureScreenPoint), not by
+    replaying whatever relativeTo chain the host addon used - Blizzard's
+    default party frames anchor 2/3/4 relative to each other, and
+    replaying that raw chain threw a genuine SetPoint error in practice.
+    More importantly, it's captured PROACTIVELY for every candidate frame
+    at the earliest opportunity (SnapshotAllFramePositions, called from
+    RefreshPins before any pin is ever (re-)applied) rather than lazily
+    the first time a frame happens to get pinned. Since a saved pin
+    re-applies itself automatically after every reload, capturing lazily
+    meant the "original" could end up being read AFTER this addon (or an
+    earlier bug) had already moved the frame once this session - silently
+    turning "restore to original" into "restore to wherever it happened to
+    be last," which is exactly what looked like reset "not working."
 
     Selection: shift-right-click any of those frames to pull that person
     out (or put them back if already pulled out). Every candidate frame
@@ -172,6 +183,30 @@ local function CaptureScreenPoint(frame)
     return result
 end
 
+-- [name] = { point, relPoint, x, y }, keyed by frame NAME (not object - a
+-- string survives just fine as a table key and this only ever needs to
+-- match against getglobal() results). Captured proactively for EVERY
+-- candidate frame, whether or not it's ever pinned, as early and as often
+-- as possible - so "original position" always means "however it looked
+-- before this addon ever touched it," never something read mid-session
+-- after a pin (or an earlier bug) might have already moved it. PinFrame
+-- prefers this over capturing fresh at pin-time for exactly that reason.
+GF.knownOriginalPositions = {}
+
+function GF.SnapshotAllFramePositions()
+    local function snap(name)
+        if GF.knownOriginalPositions[name] then return end
+        local frame = getglobal(name)
+        if not frame then return end
+        local p = CaptureScreenPoint(frame)
+        if p then GF.knownOriginalPositions[name] = p end
+    end
+    for i = 1, 4 do snap("PartyMemberFrame" .. i) end
+    for i = 1, 40 do snap("ShaguTweaksRaidUnitFrame" .. i) end
+    for i = 0, 4 do snap("pfGroup" .. i) end
+    for i = 1, 40 do snap("pfRaid" .. i) end
+end
+
 -- Takes over `frame`'s positioning so the host raid-frame addon's own
 -- layout code can no longer move it - see the header note for why this is
 -- necessary. Safe to call again for the same frame (e.g. re-applying after
@@ -187,7 +222,12 @@ function GF.PinFrame(frame, name)
         frame.gfRealSetPoint = frame.SetPoint
     end
     if not frame.gfOriginalPoint then
-        frame.gfOriginalPoint = CaptureScreenPoint(frame)
+        -- Prefer the early, proactive snapshot (see SnapshotAllFramePositions)
+        -- over capturing fresh right now - by the time a frame actually gets
+        -- pinned, it may already have been touched by an earlier pin/bug this
+        -- session, so a fresh capture here is the less reliable fallback.
+        local frameName = frame:GetName()
+        frame.gfOriginalPoint = (frameName and GF.knownOriginalPositions[frameName]) or CaptureScreenPoint(frame)
         if not frame.gfOriginalPoint then
             -- Couldn't read its position yet - probably not laid out by its
             -- host addon this early (e.g. right after a reload, racing
@@ -275,6 +315,11 @@ end
 -- timer (see the OnUpdate handler) in case some edge case slips past those
 -- events.
 function GF.RefreshPins()
+    -- Always snapshot BEFORE touching any pins - this is what makes a saved
+    -- pin re-applying itself after a reload safe: by the time PinFrame runs
+    -- for it below, there's already a clean pre-pin position on record.
+    GF.SnapshotAllFramePositions()
+
     for name, _ in pairs(GF.pins) do
         local newFrame = GF.FindFrameFor(name)
         local oldFrame = GF.heldFrames[name]
