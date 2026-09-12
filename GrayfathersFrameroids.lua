@@ -295,76 +295,99 @@ function GF.SnapshotAllFramePositions()
     end)
 end
 
--- [pinnedFrame] = { sibling frames that were frozen in place for its sake }
-GF.detachedBy = {}
-
--- Blizzard's default party frames hang off each other - frame 2 is anchored
--- to frame 1, 3 to 2, and so on - so moving one drags every frame below it
--- along with it. Pull out one person and the whole stack follows them.
---
--- The obvious fix is "find whatever is anchored to this frame and cut just
--- that loose," but that relies on GetPoint()'s relativeTo matching the frame
--- object exactly, and in practice it didn't catch the chain (an anchor can
--- point at a child region, or be two steps removed). So this takes the
--- deterministic route instead: freeze EVERY sibling in the same frame set at
--- its own current screen position before moving anything. A frame anchored
--- to a sibling that isn't moving doesn't move either, no matter how the
--- chain is actually wired. ReattachDependents puts them all back on release.
-function GF.DetachDependents(frame)
-    local detached = {}
-
-    -- Which set does this frame belong to? Only siblings can be chained to it.
+function GF.SetForFrame(frame)
     local frameName = frame:GetName()
-    local mySet
-    if frameName then
-        for _, set in ipairs(GF.FRAME_SETS) do
-            if string.find(frameName, "^" .. set.prefix) then mySet = set break end
-        end
+    if not frameName then return nil end
+    for _, set in ipairs(GF.FRAME_SETS) do
+        if string.find(frameName, "^" .. set.prefix) then return set end
     end
-    if not mySet then
-        GF.detachedBy[frame] = detached
-        return
-    end
-
-    for i = mySet.lo, mySet.hi do
-        local other = getglobal(mySet.prefix .. i)
-        if other and other ~= frame and not other.gfPinnedFor then
-            local cap = CaptureOriginalPoint(other)
-            if cap and cap.absolute then
-                other:ClearAllPoints()
-                other:SetPoint(cap.absolute.point, UIParent, cap.absolute.relPoint, cap.absolute.x, cap.absolute.y)
-                table.insert(detached, other)
-                if GF.debugClicks then
-                    GF.Say("froze " .. (other:GetName() or "?") .. " in place so it won't follow " ..
-                        (frame:GetName() or "?"))
-                end
-            end
-        end
-    end
-
-    GF.detachedBy[frame] = detached
+    return nil
 end
 
-function GF.ReattachDependents(frame)
-    local detached = GF.detachedBy[frame]
-    if not detached then return end
-    for _, other in ipairs(detached) do
-        -- Skip any that have since been pinned in their own right - they're
-        -- deliberately somewhere else now and shouldn't be yanked back.
-        if not other.gfPinnedFor then
-            local snap = other:GetName() and GF.knownOriginalPositions[other:GetName()]
-            local rel = snap and snap.raw and snap.raw.relativeTo
-            -- Also leave it frozen if the frame its anchor points AT is
-            -- itself currently pulled out - reattaching would fling this one
-            -- across the screen to chase a frame that's deliberately
-            -- somewhere else. It'll get reattached when that pin is released.
-            if snap and snap.raw and not (rel and rel.gfPinnedFor) then
-                other:ClearAllPoints()
-                pcall(other.SetPoint, other, snap.raw.point, snap.raw.relativeTo, snap.raw.relPoint, snap.raw.x, snap.raw.y)
+-- The stack's original slot positions, top to bottom, taken from the
+-- snapshots captured before this addon ever touched anything.
+local function SlotsFor(set)
+    local slots = {}
+    for i = set.lo, set.hi do
+        local snap = GF.knownOriginalPositions[set.prefix .. i]
+        if snap and snap.absolute then table.insert(slots, snap.absolute) end
+    end
+    -- Higher y is higher on screen (these are measured up from the bottom).
+    table.sort(slots, function(a, b) return a.y > b.y end)
+    return slots
+end
+
+-- Re-lays the frames still in the stack into those slots, in order, skipping
+-- anyone pulled out. That both stops the rest of the party being dragged
+-- along by a frame that moved (they're anchored to each other, so freezing
+-- them at absolute positions is what breaks that chain) AND closes the hole
+-- the pulled-out member would otherwise leave behind.
+local function RestackSet(set)
+    local slots = SlotsFor(set)
+    local slotIndex = 1
+    for i = set.lo, set.hi do
+        local frame = getglobal(set.prefix .. i)
+        if frame and not frame.gfPinnedFor and frame:IsShown() then
+            local slot = slots[slotIndex]
+            if slot then
+                frame:ClearAllPoints()
+                frame:SetPoint(slot.point, UIParent, slot.relPoint, slot.x, slot.y)
+                slotIndex = slotIndex + 1
             end
         end
     end
-    GF.detachedBy[frame] = nil
+    -- Deliberately not logged even under /gf debug: this runs on every
+    -- refresh tick while a pin is active, so it would drown out everything
+    -- else in the log.
+end
+
+-- Nothing in this set is pulled out any more, so hand the whole thing back
+-- to whichever addon owns it and let its own anchors take over again.
+local function RestoreSet(set)
+    for i = set.lo, set.hi do
+        local frame = getglobal(set.prefix .. i)
+        if frame and not frame.gfPinnedFor then
+            local snap = GF.knownOriginalPositions[set.prefix .. i]
+            if snap and snap.raw then
+                frame:ClearAllPoints()
+                pcall(frame.SetPoint, frame, snap.raw.point, snap.raw.relativeTo, snap.raw.relPoint,
+                    snap.raw.x, snap.raw.y)
+            end
+        end
+    end
+    if GF.debugClicks then
+        GF.Say("restored " .. set.prefix .. " to its own anchors")
+    end
+end
+
+-- Called after any pin or unpin. While anything in a set is pulled out we own
+-- that set's layout (so we can close gaps); the moment the last one is put
+-- back we get out of the way entirely.
+function GF.RefreshSetLayout(frame)
+    local set = GF.SetForFrame(frame)
+    if not set then return end
+
+    local anyPinned = false
+    for i = set.lo, set.hi do
+        local f = getglobal(set.prefix .. i)
+        if f and f.gfPinnedFor then anyPinned = true break end
+    end
+
+    if anyPinned then RestackSet(set) else RestoreSet(set) end
+end
+
+-- Keeps the gap closed as the group changes size underneath us. Only touches
+-- sets that actually have someone pulled out - otherwise this would sit here
+-- re-applying anchors every refresh and fight whichever addon owns them.
+function GF.RefreshAllSetLayouts()
+    for _, set in ipairs(GF.FRAME_SETS) do
+        local anyPinned = false
+        for i = set.lo, set.hi do
+            local f = getglobal(set.prefix .. i)
+            if f and f.gfPinnedFor then anyPinned = true break end
+        end
+        if anyPinned then RestackSet(set) end
+    end
 end
 
 -- Takes over `frame`'s positioning so the host raid-frame addon's own
@@ -415,12 +438,12 @@ function GF.PinFrame(frame, name)
         end
     end
 
-    -- Cut loose anything anchored to this frame BEFORE moving it, or the
-    -- whole stack below it comes along for the ride.
-    GF.DetachDependents(frame)
-
     GF.ApplyPin(frame)
     EnableDragging(frame)
+
+    -- Re-lay the rest of the stack: stops them being dragged along by the
+    -- frame we just moved, and closes the gap it left behind.
+    GF.RefreshSetLayout(frame)
 end
 
 -- Hands the frame back AND explicitly restores its captured original
@@ -465,9 +488,9 @@ function GF.UnpinFrame(frame)
     end
     frame.gfPinnedFor = nil
     GF.ClearUserPlaced(frame)
-    -- This frame is back where it belongs, so anything that used to hang off
-    -- it can be re-hooked to it again.
-    GF.ReattachDependents(frame)
+    -- This one is back in the stack, so re-lay the rest around it (or hand
+    -- the whole set back to its owner if nothing's pulled out any more).
+    GF.RefreshSetLayout(frame)
 end
 
 -- Un-flags a frame as "user placed" so the client stops persisting its
@@ -546,6 +569,8 @@ function GF.RefreshPins()
         end
     end
 
+    -- Keeps gaps closed as people join/leave the group underneath us.
+    GF.RefreshAllSetLayouts()
     GF.HookAllFrames()
 end
 
