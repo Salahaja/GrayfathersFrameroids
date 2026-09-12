@@ -133,10 +133,18 @@ end
 
 -- Applies a pin's saved position, going straight through the captured real
 -- SetPoint so it bypasses our own override.
+--
+-- ClearAllPoints first is load-bearing: SetPoint ADDS an anchor, and only
+-- replaces an existing one when it's the same point name. The host frame
+-- still carries its own anchor (TOPLEFT for Blizzard/Shagu, BOTTOMLEFT for
+-- pfUI), so pinning to CENTER without clearing leaves two conflicting
+-- anchors and the frame simply refuses to move - which also makes dragging
+-- look completely dead, since every drag update just loses that same fight.
 function GF.ApplyPin(frame)
     local name = frame.gfPinnedFor
     local p = name and GF.pins[name]
     if not p or not frame.gfRealSetPoint then return end
+    frame:ClearAllPoints()
     frame.gfRealSetPoint(frame, p.point, UIParent, p.relPoint, p.x, p.y)
 end
 
@@ -344,12 +352,16 @@ function GF.UnpinFrame(frame)
             -- screen position that ignores the actual relationship between
             -- frames. pcall since replaying an arbitrary relativeTo isn't
             -- guaranteed safe for every frame type.
+            -- Same reason as in ApplyPin: the pin's own anchor has to be
+            -- cleared off, or restoring the original just adds a second,
+            -- conflicting anchor next to it.
             if o.raw then
                 if GF.debugClicks then
                     local relName = o.raw.relativeTo and o.raw.relativeTo.GetName and o.raw.relativeTo:GetName() or "nil"
                     GF.Say("restoring " .. (frame:GetName() or "?") .. " via raw anchor: " ..
                         tostring(o.raw.point) .. " rel-to " .. tostring(relName) .. " " .. tostring(o.raw.relPoint))
                 end
+                frame:ClearAllPoints()
                 restored = pcall(frame.gfRealSetPoint, frame, o.raw.point, o.raw.relativeTo, o.raw.relPoint, o.raw.x, o.raw.y)
             end
             if not restored and o.absolute then
@@ -357,6 +369,7 @@ function GF.UnpinFrame(frame)
                     GF.Say("raw anchor restore failed or unavailable, falling back to absolute x=" ..
                         o.absolute.x .. " y=" .. o.absolute.y)
                 end
+                frame:ClearAllPoints()
                 frame.gfRealSetPoint(frame, o.absolute.point, UIParent, o.absolute.relPoint, o.absolute.x, o.absolute.y)
             end
         elseif GF.debugClicks then
