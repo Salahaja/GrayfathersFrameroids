@@ -151,15 +151,25 @@ end
 -- they're just numbers, not frame references.
 local function CaptureScreenPoint(frame)
     local left, top = frame:GetLeft(), frame:GetTop()
-    if not left or not top then return nil end
+    if not left or not top then
+        if GF.debugClicks then
+            GF.Say("capture failed on " .. (frame:GetName() or "?") .. " - GetLeft/GetTop returned nil")
+        end
+        return nil
+    end
     local scale = frame:GetEffectiveScale()
     local uiScale = UIParent:GetEffectiveScale()
-    return {
+    local result = {
         point = "TOPLEFT",
         relPoint = "BOTTOMLEFT",
         x = left * scale / uiScale,
         y = top * scale / uiScale,
     }
+    if GF.debugClicks then
+        GF.Say("captured " .. (frame:GetName() or "?") .. " - left=" .. left .. " top=" .. top ..
+            " scale=" .. scale .. " -> x=" .. result.x .. " y=" .. result.y)
+    end
+    return result
 end
 
 -- Takes over `frame`'s positioning so the host raid-frame addon's own
@@ -225,7 +235,12 @@ function GF.UnpinFrame(frame)
         frame.SetPoint = frame.gfRealSetPoint
         local o = frame.gfOriginalPoint
         if o then
+            if GF.debugClicks then
+                GF.Say("restoring " .. (frame:GetName() or "?") .. " to x=" .. o.x .. " y=" .. o.y)
+            end
             frame.gfRealSetPoint(frame, o.point, UIParent, o.relPoint, o.x, o.y)
+        elseif GF.debugClicks then
+            GF.Say("no captured original position to restore for " .. (frame:GetName() or "?"))
         end
     end
     frame.gfPinnedFor = nil
