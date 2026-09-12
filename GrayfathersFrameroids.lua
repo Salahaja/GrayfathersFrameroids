@@ -56,15 +56,28 @@
     be last," which is exactly what looked like reset "not working."
 
     Selection: shift-right-click any of those frames to pull that person
-    out (or put them back if already pulled out). Every candidate frame
+    out (or put them back if already pulled out); ctrl-right-click sends
+    them to the top of the stack instead. Every candidate frame
     gets this hook lazily (see HookAllFrames) without disturbing its
     normal single-click targeting or plain right-click menu - it wraps
     whatever OnClick handler was already there rather than replacing it.
 
+    Separately from pulling anyone out, a person can be given a fixed
+    position in the stack (GF.order / RestackSet) - "the tank sits directly
+    under my player frame" regardless of which party/raid slot they actually
+    occupy. That reuses the same machinery as gap-closing, since a slot is
+    just a position on screen either way.
+
     Slash Commands (both equivalent - /gf, /frameroids):
-        /gf                 lists everyone currently pulled out
+        /gf                 lists everyone pulled out and every fixed position
+        /gf top <name>      puts them at the top of the stack
+        /gf order <name> <n>
+                            puts them at position n in the stack (1 = top)
+        /gf order           lists the fixed positions, in order
+        /gf order clear <name> / /gf order reset
+                            drops one / all fixed positions
         /gf clear <name>    puts a specific person back
-        /gf reset           puts everyone back at once
+        /gf reset           puts everyone back and clears all fixed positions
         /gf probe           diagnostic: how many frames of each type exist vs.
                              how many this addon has actually hooked
         /gf debug           toggles printing every click seen on a hooked
@@ -77,6 +90,7 @@ GF.ADDON_NAME = "GrayfathersFrameroids"
 
 GF.pins        = {} -- [name] = { point, relPoint, x, y } - saved screen position, relative to UIParent
 GF.heldFrames  = {} -- [name] = the real frame object currently pinned for them (see RefreshPins)
+GF.order       = {} -- [name] = stack position they should occupy (1 = topmost) - see RestackSet
 
 -- ---------------------------------------------------------------------------------------------
 -- Helpers
@@ -125,6 +139,60 @@ function GF.FindFrameFor(name)
     end
 
     return nil
+end
+
+-- The reverse of FindFrameFor: which unit does this frame currently show?
+-- Each supported system stores that differently - Blizzard's party frames
+-- only by their own index, Shagu's in `unitstr`, pfUI's split across
+-- `label`/`id` - so this is the one place that knows all three.
+function GF.UnitForFrame(frame)
+    local frameName = frame:GetName()
+    if frameName then
+        local _, _, idx = string.find(frameName, "^PartyMemberFrame(%d+)$")
+        if idx then return "party" .. idx end
+    end
+    if frame.unitstr then return frame.unitstr end
+    if frame.label and frame.id then return frame.label .. frame.id end
+    return nil
+end
+
+function GF.NameForFrame(frame)
+    local unit = GF.UnitForFrame(frame)
+    if unit and UnitExists(unit) then return UnitName(unit) end
+    return nil
+end
+
+-- Turns whatever the player typed into the exact name spelling this addon
+-- keys everything by. Slash command text arrives however they typed it, and
+-- WoW names are capitalized, so "/gf top bob" has to find "Bob". Checks the
+-- live group first (authoritative), then names already saved here (so
+-- someone offline can still be cleared), and only then falls back to just
+-- capitalizing what they typed.
+function GF.ResolveName(input)
+    if not input or input == "" then return nil end
+    local lower = string.lower(input)
+
+    local function match(unit)
+        if UnitExists(unit) then
+            local n = UnitName(unit)
+            if n and string.lower(n) == lower then return n end
+        end
+        return nil
+    end
+
+    local n = match("player")
+    if n then return n end
+    for i = 1, 4 do n = match("party" .. i) if n then return n end end
+    for i = 1, 40 do n = match("raid" .. i) if n then return n end end
+
+    for name, _ in pairs(GF.pins) do
+        if string.lower(name) == lower then return name end
+    end
+    for name, _ in pairs(GF.order) do
+        if string.lower(name) == lower then return name end
+    end
+
+    return string.upper(string.sub(input, 1, 1)) .. string.sub(input, 2)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -331,28 +399,87 @@ local function SlotsFor(set)
         end
         if slot then table.insert(slots, slot) end
     end
-    -- Higher y is higher on screen (these are measured up from the bottom).
-    table.sort(slots, function(a, b) return a.y > b.y end)
+    -- Reading order: top to bottom, then left to right. y is measured up from
+    -- the bottom, so higher y is higher on screen. The x tiebreak only
+    -- matters for grid layouts (pfUI raid in particular puts whole groups
+    -- side by side), where several slots share a row.
+    table.sort(slots, function(a, b)
+        if a.y ~= b.y then return a.y > b.y end
+        return a.x < b.x
+    end)
     return slots
 end
 
--- Re-lays the frames still in the stack into those slots, in order, skipping
--- anyone pulled out. That both stops the rest of the party being dragged
--- along by a frame that moved (they're anchored to each other, so freezing
--- them at absolute positions is what breaks that chain) AND closes the hole
--- the pulled-out member would otherwise leave behind.
+-- Re-lays the frames still in the stack into those slots, skipping anyone
+-- pulled out. That does three jobs at once: it stops the rest of the party
+-- being dragged along by a frame that moved (they're anchored to each other,
+-- so freezing them at absolute positions is what breaks that chain), it
+-- closes the hole a pulled-out member would otherwise leave behind, and it's
+-- where GF.order gets honoured - a slot is just a position on screen, so
+-- putting a specific person in a specific slot is the same operation as
+-- closing a gap.
+--
+-- Assignment order matters: everyone with an explicit rank is placed first,
+-- lowest rank (highest on screen) first, so they get the slot they asked for
+-- before anyone else can take it. If two people want the same slot the
+-- second one lands just below, rather than one of them silently losing their
+-- placement. Everyone unranked then fills whatever slots are left, keeping
+-- their host addon's own relative order.
 local function RestackSet(set)
     local slots = SlotsFor(set)
-    local slotIndex = 1
+    local numSlots = table.getn(slots)
+    if numSlots == 0 then return end
+
+    local entries, ranked = {}, {}
     for i = set.lo, set.hi do
         local frame = getglobal(set.prefix .. i)
         if frame and not frame.gfPinnedFor and frame:IsShown() then
-            local slot = slots[slotIndex]
-            if slot then
-                frame:ClearAllPoints()
-                frame:SetPoint(slot.point, UIParent, slot.relPoint, slot.x, slot.y)
-                slotIndex = slotIndex + 1
-            end
+            local name = GF.NameForFrame(frame)
+            local entry = {
+                frame = frame,
+                rank = name and GF.order[name] or nil,
+                stamp = (name and GF.orderStamp[name]) or 0,
+            }
+            table.insert(entries, entry)
+            if entry.rank then table.insert(ranked, entry) end
+        end
+    end
+
+    local taken = {}
+    -- Claims the first free slot at or below `from`, so a taken request
+    -- degrades to "as close as I can get" instead of dropping the frame.
+    local function claim(entry, from)
+        if from < 1 then from = 1 end
+        for i = from, numSlots do
+            if not taken[i] then taken[i] = entry return true end
+        end
+        return false
+    end
+
+    table.sort(ranked, function(a, b)
+        if a.rank ~= b.rank then return a.rank < b.rank end
+        return a.stamp > b.stamp
+    end)
+    for _, entry in ipairs(ranked) do
+        -- A rank past the end of the stack (ranked for a full raid, currently
+        -- in a 5-man) falls back to the top rather than going unplaced.
+        if not claim(entry, entry.rank) then claim(entry, 1) end
+    end
+
+    local nextFree = 1
+    for _, entry in ipairs(entries) do
+        if not entry.rank then
+            while taken[nextFree] do nextFree = nextFree + 1 end
+            if nextFree > numSlots then break end
+            taken[nextFree] = entry
+        end
+    end
+
+    for i = 1, numSlots do
+        local entry, slot = taken[i], slots[i]
+        if entry then
+            entry.frame:ClearAllPoints()
+            entry.frame:SetPoint(slot.point, UIParent, slot.relPoint, slot.x, slot.y)
         end
     end
     -- Deliberately not logged even under /gf debug: this runs on every
@@ -379,33 +506,50 @@ local function RestoreSet(set)
     end
 end
 
--- Called after any pin or unpin. While anything in a set is pulled out we own
--- that set's layout (so we can close gaps); the moment the last one is put
--- back we get out of the way entirely.
-function GF.RefreshSetLayout(frame)
-    local set = GF.SetForFrame(frame)
-    if not set then return end
-
-    local anyPinned = false
+-- Two things make us take over a set's layout: someone in it is pulled out
+-- (so there's a gap to close and an anchor chain to break), or someone
+-- currently in it has been given an explicit stack position. Otherwise the
+-- set belongs entirely to whichever addon drew it.
+local function SetNeedsLayout(set)
+    local anyOrdered = next(GF.order) ~= nil
     for i = set.lo, set.hi do
         local f = getglobal(set.prefix .. i)
-        if f and f.gfPinnedFor then anyPinned = true break end
+        if f then
+            if f.gfPinnedFor then return true end
+            if anyOrdered and f:IsShown() then
+                local name = GF.NameForFrame(f)
+                if name and GF.order[name] then return true end
+            end
+        end
     end
-
-    if anyPinned then RestackSet(set) else RestoreSet(set) end
+    return false
 end
 
--- Keeps the gap closed as the group changes size underneath us. Only touches
--- sets that actually have someone pulled out - otherwise this would sit here
--- re-applying anchors every refresh and fight whichever addon owns them.
+-- `set.managed` tracks whether the set is currently ours, so handing it back
+-- happens exactly once, on the transition. Without that, every refresh tick
+-- would re-assert original anchors on sets we have no business touching, and
+-- that's a fight with the host addon rather than a no-op.
+function GF.ApplySetLayout(set)
+    if SetNeedsLayout(set) then
+        set.managed = true
+        RestackSet(set)
+    elseif set.managed then
+        set.managed = nil
+        RestoreSet(set)
+    end
+end
+
+-- Called after any pin, unpin, or ordering change.
+function GF.RefreshSetLayout(frame)
+    local set = GF.SetForFrame(frame)
+    if set then GF.ApplySetLayout(set) end
+end
+
+-- Keeps placements and closed gaps correct as the group changes size
+-- underneath us.
 function GF.RefreshAllSetLayouts()
     for _, set in ipairs(GF.FRAME_SETS) do
-        local anyPinned = false
-        for i = set.lo, set.hi do
-            local f = getglobal(set.prefix .. i)
-            if f and f.gfPinnedFor then anyPinned = true break end
-        end
-        if anyPinned then RestackSet(set) end
+        GF.ApplySetLayout(set)
     end
 end
 
@@ -557,6 +701,38 @@ function GF.TogglePin(name)
     end
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Ordering (put a specific person in a specific stack position)
+-- ---------------------------------------------------------------------------------------------
+
+-- Rank 1 is the top of the stack, 2 the one below it, and so on. This is a
+-- position in the group of frames, NOT a party/raid index - which is the
+-- whole point: the tank can be party4 and still sit at the top.
+-- Tiebreaker for two people asking for the same position: whoever asked most
+-- recently gets it, since that's what "send this one to the top" is meant to
+-- do even when someone's already there. Deliberately not saved - after a
+-- reload a tie just falls back to frame order, which is fine, and it keeps
+-- the saved format a plain name -> number table.
+GF.orderStamp = {}
+GF.orderStampNext = 1
+
+function GF.SetOrder(name, rank)
+    GF.order[name] = rank
+    GF.orderStamp[name] = GF.orderStampNext
+    GF.orderStampNext = GF.orderStampNext + 1
+    GF_Order = GF.order
+    GF.RefreshAllSetLayouts()
+end
+
+function GF.ClearOrder(name)
+    if not GF.order[name] then return false end
+    GF.order[name] = nil
+    GF.orderStamp[name] = nil
+    GF_Order = GF.order
+    GF.RefreshAllSetLayouts()
+    return true
+end
+
 -- Re-resolves every pin's real frame (in case the raid reshuffled who's in
 -- which slot) and re-hooks any frame this addon hasn't seen before, so
 -- newly-created slots (e.g. a raid growing past 20 people) become
@@ -615,22 +791,36 @@ function GF.HookSelection(frame, getUnit)
         -- makes this immune to whatever the wrapped handler does internally.
         local button = arg1
         local shiftHeld = IsShiftKeyDown()
+        local ctrlHeld = IsControlKeyDown()
 
         if GF.debugClicks then
             GF.Say("click seen on " .. (this:GetName() or "?") .. " - button=" .. tostring(button) ..
-                " shift=" .. tostring(shiftHeld))
+                " shift=" .. tostring(shiftHeld) .. " ctrl=" .. tostring(ctrlHeld))
         end
 
         -- pcall so an error inside the original handler (unrelated to this
         -- addon) can't silently eat our own logic below it.
         if orig then pcall(orig) end
 
-        if button == "RightButton" and shiftHeld then
+        if button == "RightButton" and (shiftHeld or ctrlHeld) then
             local unit = getUnit()
-            if unit and UnitExists(unit) then
-                GF.TogglePin(UnitName(unit))
-            else
+            if not (unit and UnitExists(unit)) then
                 GF.Say("|cFFFF3333couldn't find a valid unit on that frame|r - try again after a roster update.")
+                return
+            end
+            local name = UnitName(unit)
+
+            if ctrlHeld then
+                -- Ctrl-right-click toggles "top of the stack" - the one
+                -- placement worth doing mid-fight, without typing a name.
+                if GF.ClearOrder(name) then
+                    GF.Say(name .. " back to your raid frame addon's own order.")
+                else
+                    GF.SetOrder(name, 1)
+                    GF.Say(name .. " moved to the top of the stack.")
+                end
+            else
+                GF.TogglePin(name)
             end
         end
     end)
@@ -677,15 +867,16 @@ end
 SLASH_GRAYFATHERSFRAMEROIDS1 = "/gf"
 SLASH_GRAYFATHERSFRAMEROIDS2 = "/frameroids"
 SlashCmdList["GRAYFATHERSFRAMEROIDS"] = function(msg)
-    msg = string.lower(msg or "")
-    local cmd, arg2 = "", ""
-    local i = 1
-    for word in string.gfind(msg .. " ", "([^ ]+)") do
-        if i == 1 then cmd = word elseif i == 2 then arg2 = word end
-        i = i + 1
-    end
+    -- Words are kept as typed (only the command word is lowercased) - names
+    -- are arguments here, and lowercasing them made them stop matching the
+    -- capitalized names everything is keyed by.
+    local words = {}
+    for word in string.gfind(msg or "", "[^%s]+") do table.insert(words, word) end
+    local cmd = string.lower(words[1] or "")
+    local arg2, arg3 = words[2], words[3]
+    local arg2lower = string.lower(arg2 or "")
 
-    if cmd == "reset" or (cmd == "clear" and arg2 == "all") then
+    if cmd == "reset" or (cmd == "clear" and arg2lower == "all") then
         for name, _ in pairs(GF.pins) do
             local frame = GF.heldFrames[name]
             if frame then GF.UnpinFrame(frame) end
@@ -693,7 +884,54 @@ SlashCmdList["GRAYFATHERSFRAMEROIDS"] = function(msg)
         GF.pins = {}
         GF.heldFrames = {}
         GF_Pins = GF.pins
-        GF.Say("reset - everyone released back to the grid.")
+        GF.order = {}
+        GF_Order = GF.order
+        GF.RefreshAllSetLayouts()
+        GF.Say("reset - everyone released back to the grid, and all stack positions cleared.")
+    elseif cmd == "top" then
+        if not arg2 then
+            GF.Say("usage: /gf top <name> - puts them at the top of the stack.")
+        else
+            local name = GF.ResolveName(arg2)
+            GF.SetOrder(name, 1)
+            GF.Say(name .. " moved to the top of the stack.")
+        end
+    elseif cmd == "order" then
+        if not arg2 then
+            -- Listing in rank order rather than pairs() order, since rank is
+            -- the only thing anyone reading this list cares about.
+            local list = {}
+            for name, rank in pairs(GF.order) do table.insert(list, { name = name, rank = rank }) end
+            table.sort(list, function(a, b) return a.rank < b.rank end)
+            if table.getn(list) == 0 then
+                GF.Say("no stack positions set. Try: /gf order <name> <position> (1 = top), or /gf top <name>.")
+            else
+                for _, e in ipairs(list) do
+                    GF.Say("  " .. e.rank .. ". " .. e.name)
+                end
+            end
+        elseif arg2lower == "reset" or (arg2lower == "clear" and not arg3) then
+            GF.order = {}
+            GF_Order = GF.order
+            GF.RefreshAllSetLayouts()
+            GF.Say("all stack positions cleared - back to your raid frame addon's own order.")
+        elseif arg2lower == "clear" then
+            local name = GF.ResolveName(arg3)
+            if GF.ClearOrder(name) then
+                GF.Say(name .. " no longer has a fixed stack position.")
+            else
+                GF.Say("no stack position set for \"" .. name .. "\".")
+            end
+        else
+            local rank = tonumber(arg3)
+            if not rank or rank < 1 then
+                GF.Say("usage: /gf order <name> <position> - position 1 is the top of the stack.")
+            else
+                local name = GF.ResolveName(arg2)
+                GF.SetOrder(name, math.floor(rank))
+                GF.Say(name .. " set to position " .. math.floor(rank) .. " in the stack.")
+            end
+        end
     elseif cmd == "cleanup" then
         -- Repairs the one bit of damage older versions of this addon could
         -- leave behind - see GF.ClearUserPlaced.
@@ -716,11 +954,12 @@ SlashCmdList["GRAYFATHERSFRAMEROIDS"] = function(msg)
         sweep("pfRaid", 1, 40)
         GF.Say("cleared the user-placed flag on " .. cleared .. " frame(s). Log out (not just /reloadui) " ..
             "so the client rewrites layout-cache.txt without them.")
-    elseif cmd == "clear" and arg2 ~= "" then
-        if GF.pins[arg2] then
-            GF.TogglePin(arg2)
+    elseif cmd == "clear" and arg2 then
+        local name = GF.ResolveName(arg2)
+        if GF.pins[name] then
+            GF.TogglePin(name)
         else
-            GF.Say("no pin found for \"" .. arg2 .. "\".")
+            GF.Say("no pin found for \"" .. name .. "\".")
         end
     elseif cmd == "" then
         local any = false
@@ -730,6 +969,9 @@ SlashCmdList["GRAYFATHERSFRAMEROIDS"] = function(msg)
         end
         if not any then
             GF.Say("nothing pulled out. Shift-right-click a party/raid frame to pull someone out.")
+        end
+        for name, rank in pairs(GF.order) do
+            GF.Say("- " .. name .. " |cFF888888is set to stack position " .. rank .. "|r")
         end
     elseif cmd == "probe" then
         -- Diagnostic: how many of each frame type currently exist, and how
@@ -781,7 +1023,8 @@ SlashCmdList["GRAYFATHERSFRAMEROIDS"] = function(msg)
         GF.debugClicks = not GF.debugClicks
         GF.Say("click debugging: " .. (GF.debugClicks and "|cFF00FF7Fon|r - every click on a hooked frame will print here" or "|cFFFF5179off|r"))
     else
-        GF.Say("usage: /gf, /gf clear <name>, /gf reset, /gf cleanup, /gf probe, /gf debug")
+        GF.Say("usage: /gf, /gf top <name>, /gf order <name> <position>, /gf order, " ..
+            "/gf order clear <name>, /gf clear <name>, /gf reset, /gf cleanup, /gf probe, /gf debug")
     end
 end
 
@@ -797,6 +1040,7 @@ ev:RegisterEvent("RAID_ROSTER_UPDATE")
 ev:SetScript("OnEvent", function()
     if event == "ADDON_LOADED" and arg1 == GF.ADDON_NAME then
         GF.pins = GF_Pins or {}
+        GF.order = GF_Order or {}
     else
         GF.RefreshPins()
     end

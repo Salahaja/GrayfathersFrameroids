@@ -1,6 +1,8 @@
-# Grayfather's Frameroids (v1.1.1)
+# Grayfather's Frameroids (v1.2.0)
 
 For tanks and healers: pull a specific party/raid member's **real** unit frame out of whatever raid-frame addon draws it, and pin it anywhere on screen. It's the actual frame - not a copy - so everything about it (health/mana bars, debuffs, click-to-target, right-click menu) works exactly as it always did. Once pinned, it keeps tracking that person by name even if the raid reshuffles them into a different subgroup.
+
+Or, without pulling anyone out at all: give someone a **fixed position in the stack**. If the tank is party member 5 but you want them right under your own player frame, `/gf top Tankname` puts them there and keeps them there.
 
 ## Why this is harder than "just move a frame"
 
@@ -14,6 +16,24 @@ There's one more wrinkle with Blizzard's default party frames specifically: they
 
 So while anyone in a group of frames is pulled out, this addon takes over that group's layout: the frames still in the stack get placed into the stack's original slot positions, in order, skipping whoever's been pulled out. That kills two birds - the chain can't drag anyone along (nobody's anchored to a moving frame any more), and **the gap closes up** instead of leaving a hole where the pulled-out member used to be. The moment the last pin in that group is released, the addon hands the whole thing back to whichever addon owns it and stops touching it entirely.
 
+That same machinery is what makes reordering possible, since a slot is just a position on screen - whether a frame goes into it because someone above was pulled out or because you asked for that person to be there is the same operation.
+
+## Reordering: put specific people in specific spots
+
+```
+/gf top <name>              put them at the top of the stack
+/gf order <name> <position>  put them at a specific position (1 = top)
+/gf order                    list the positions you've set, in order
+/gf order clear <name>       drop one
+/gf order reset              drop them all
+```
+
+**Position 1 is the top frame of the stack** - the one closest to your own player frame - not a party or raid index. That distinction is the whole point: the tank can be party member 5 and still sit at position 1.
+
+Positions are filled most-important-first, so if two people end up wanting the same spot, the second one lands just below rather than losing their placement. Everyone you *haven't* given a position keeps their raid-frame addon's own order and fills whatever slots are left. A position past the end of the current stack (someone set for a full raid while you're in a 5-man) falls back to the top instead of going unplaced.
+
+Positions are remembered by name, so they survive reloads, and they reassert themselves whenever the roster shuffles.
+
 ## Supported raid-frame addons
 
 - Blizzard's own default party frames (`PartyMemberFrame1`-`4`)
@@ -26,15 +46,19 @@ If you're not running either ShaguTweaks-extras or pfUI, only party members (via
 
 **Shift-right-click** any supported frame to pull that person out. Shift-right-click their frame again (wherever it currently is) to release them back to the grid. Drag a pulled-out frame anywhere - its new position is saved automatically.
 
+**Ctrl-right-click** a frame to send that person to the top of the stack instead (ctrl-right-click again to undo it) - the one placement worth being able to do mid-pull without typing a name.
+
 ```
-/gf                 lists everyone currently pulled out
+/gf                 lists everyone pulled out, plus any fixed stack positions
 /gf clear <name>    puts a specific person back
-/gf reset           puts everyone back at once
+/gf reset           puts everyone back and clears all fixed positions
+/gf top <name>      puts them at the top of the stack (see Reordering below)
+/gf order ...       fixed stack positions (see Reordering below)
 /gf probe           diagnostic: frames found vs. frames actually hooked,
                     per frame type - useful if shift-right-click isn't
                     doing anything on a frame it should work on
 /gf debug           toggles printing every click seen on a hooked frame
-                    (button + shift state), for tracking down why
+                    (button + shift/ctrl state), for tracking down why
                     shift-right-click isn't registering
 /gf cleanup         clears the "user placed" flag off every supported frame
                     - only needed if you used v1.0.4 or earlier, see below
@@ -59,7 +83,8 @@ You can confirm it worked by checking that file — there should be no `PartyMem
 
 - If the person you pulled out isn't currently visible in any supported raid-frame addon (not in your group, or you have none of the supported addons installed), the pin just waits - it'll pick them back up automatically the moment a matching frame appears for them again.
 - Shift-right-click is the only way to pull someone out right now - there's no roster-list picker.
-- Pins are per-character (`SavedVariablesPerCharacter`), since a tank and a healer on the same account will likely want different setups.
+- Pins and stack positions are per-character (`SavedVariablesPerCharacter`), since a tank and a healer on the same account will likely want different setups.
+- Reordering rearranges frames within one raid-frame system at a time, using that system's own slot positions. It can't move someone from, say, a pfUI raid frame into the Blizzard party stack.
 
 ## Author
 
