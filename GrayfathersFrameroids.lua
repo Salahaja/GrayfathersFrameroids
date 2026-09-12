@@ -26,12 +26,20 @@
     still works. This is a per-frame-instance override (only shadows
     SetPoint on that one Lua table), so it can't affect any other frame.
 
-    "Original position" (what UnpinFrame restores) is captured as plain
-    absolute numbers relative to UIParent (see CaptureScreenPoint), not by
-    replaying whatever relativeTo chain the host addon used - Blizzard's
-    default party frames anchor 2/3/4 relative to each other, and
-    replaying that raw chain threw a genuine SetPoint error in practice.
-    More importantly, it's captured PROACTIVELY for every candidate frame
+    "Original position" (what UnpinFrame restores) is captured TWO ways
+    (see CaptureOriginalPoint): the frame's REAL current anchor (point,
+    relativeTo, relativePoint, offsets - exactly as GetPoint() reports it),
+    which is what actually matters for Blizzard's default party frames,
+    since 2/3/4 are anchored relative to the frame ABOVE them rather than
+    independently - that relationship is what keeps them tightly and
+    evenly stacked, and only restoring a frozen absolute screen position
+    throws it away entirely (this broke the stack's spacing in practice).
+    A plain-numbers absolute-to-UIParent fallback is captured alongside it
+    for frames where replaying the real anchor isn't safe (wrapped in
+    pcall on restore, in case some relativeTo isn't valid to replay
+    directly). The real anchor is always tried first.
+
+    It's captured PROACTIVELY for every candidate frame
     at the earliest opportunity (SnapshotAllFramePositions, called from
     RefreshPins before any pin is ever (re-)applied) rather than lazily
     the first time a frame happens to get pinned. Since a saved pin
@@ -152,35 +160,43 @@ local function EnableDragging(frame)
     end)
 end
 
--- Reads a frame's CURRENT on-screen position as plain absolute numbers,
--- relative to UIParent - rather than whatever relativeTo chain the host
--- addon actually used, which can be another sibling frame (Blizzard's
--- default party frames anchor 2/3/4 relative to each other, not
--- independently). Capturing and later replaying that raw relative-anchor
--- tuple turned out to be fragile - it threw a genuine SetPoint argument
--- error in practice. GetLeft()/GetTop() sidestep that entirely since
--- they're just numbers, not frame references.
-local function CaptureScreenPoint(frame)
+-- Reads a frame's CURRENT position two ways: the REAL anchor (whatever
+-- point/relativeTo/relativePoint/offset it actually has right now - for
+-- Blizzard's default party frames, 2/3/4 are anchored relative to the
+-- frame ABOVE them, not independently, which is what keeps them tightly
+-- and evenly stacked regardless of anything else going on) as the
+-- preferred restore target, plus a plain-numbers absolute-to-UIParent
+-- fallback (via GetLeft/GetTop) for frames where the real anchor can't be
+-- safely replayed. Only using the absolute fallback (the previous
+-- approach) throws away that relative relationship entirely, which is
+-- exactly what broke the party frame stack's spacing/gap.
+local function CaptureOriginalPoint(frame)
+    local point, relativeTo, relPoint, x, y = frame:GetPoint()
+    local raw = point and { point = point, relativeTo = relativeTo, relPoint = relPoint, x = x, y = y }
+
+    local absolute
     local left, top = frame:GetLeft(), frame:GetTop()
-    if not left or not top then
-        if GF.debugClicks then
-            GF.Say("capture failed on " .. (frame:GetName() or "?") .. " - GetLeft/GetTop returned nil")
-        end
-        return nil
+    if left and top then
+        local scale = frame:GetEffectiveScale()
+        local uiScale = UIParent:GetEffectiveScale()
+        absolute = {
+            point = "TOPLEFT",
+            relPoint = "BOTTOMLEFT",
+            x = left * scale / uiScale,
+            y = top * scale / uiScale,
+        }
     end
-    local scale = frame:GetEffectiveScale()
-    local uiScale = UIParent:GetEffectiveScale()
-    local result = {
-        point = "TOPLEFT",
-        relPoint = "BOTTOMLEFT",
-        x = left * scale / uiScale,
-        y = top * scale / uiScale,
-    }
+
     if GF.debugClicks then
-        GF.Say("captured " .. (frame:GetName() or "?") .. " - left=" .. left .. " top=" .. top ..
-            " scale=" .. scale .. " -> x=" .. result.x .. " y=" .. result.y)
+        local relName = raw and raw.relativeTo and raw.relativeTo.GetName and raw.relativeTo:GetName() or "UIParent/nil"
+        GF.Say("captured " .. (frame:GetName() or "?") ..
+            " - raw: " .. tostring(raw and raw.point) .. " rel-to " .. tostring(relName) ..
+            " " .. tostring(raw and raw.relPoint) .. " (" .. tostring(raw and raw.x) .. "," .. tostring(raw and raw.y) .. ")" ..
+            " | absolute: " .. tostring(absolute and absolute.x) .. "," .. tostring(absolute and absolute.y))
     end
-    return result
+
+    if not raw and not absolute then return nil end
+    return { raw = raw, absolute = absolute }
 end
 
 -- [name] = { point, relPoint, x, y }, keyed by frame NAME (not object - a
@@ -198,7 +214,7 @@ function GF.SnapshotAllFramePositions()
         if GF.knownOriginalPositions[name] then return end
         local frame = getglobal(name)
         if not frame then return end
-        local p = CaptureScreenPoint(frame)
+        local p = CaptureOriginalPoint(frame)
         if p then GF.knownOriginalPositions[name] = p end
     end
     for i = 1, 4 do snap("PartyMemberFrame" .. i) end
@@ -227,7 +243,7 @@ function GF.PinFrame(frame, name)
         -- pinned, it may already have been touched by an earlier pin/bug this
         -- session, so a fresh capture here is the less reliable fallback.
         local frameName = frame:GetName()
-        frame.gfOriginalPoint = (frameName and GF.knownOriginalPositions[frameName]) or CaptureScreenPoint(frame)
+        frame.gfOriginalPoint = (frameName and GF.knownOriginalPositions[frameName]) or CaptureOriginalPoint(frame)
         if not frame.gfOriginalPoint then
             -- Couldn't read its position yet - probably not laid out by its
             -- host addon this early (e.g. right after a reload, racing
@@ -275,10 +291,29 @@ function GF.UnpinFrame(frame)
         frame.SetPoint = frame.gfRealSetPoint
         local o = frame.gfOriginalPoint
         if o then
-            if GF.debugClicks then
-                GF.Say("restoring " .. (frame:GetName() or "?") .. " to x=" .. o.x .. " y=" .. o.y)
+            local restored = false
+            -- Prefer the REAL anchor (e.g. "relative to PartyMemberFrame2's
+            -- bottom") over the absolute-coordinate fallback - that's what
+            -- keeps Blizzard's party frame stack tightly and evenly spaced
+            -- exactly like it was, rather than freezing it at a fixed
+            -- screen position that ignores the actual relationship between
+            -- frames. pcall since replaying an arbitrary relativeTo isn't
+            -- guaranteed safe for every frame type.
+            if o.raw then
+                if GF.debugClicks then
+                    local relName = o.raw.relativeTo and o.raw.relativeTo.GetName and o.raw.relativeTo:GetName() or "nil"
+                    GF.Say("restoring " .. (frame:GetName() or "?") .. " via raw anchor: " ..
+                        tostring(o.raw.point) .. " rel-to " .. tostring(relName) .. " " .. tostring(o.raw.relPoint))
+                end
+                restored = pcall(frame.gfRealSetPoint, frame, o.raw.point, o.raw.relativeTo, o.raw.relPoint, o.raw.x, o.raw.y)
             end
-            frame.gfRealSetPoint(frame, o.point, UIParent, o.relPoint, o.x, o.y)
+            if not restored and o.absolute then
+                if GF.debugClicks then
+                    GF.Say("raw anchor restore failed or unavailable, falling back to absolute x=" ..
+                        o.absolute.x .. " y=" .. o.absolute.y)
+                end
+                frame.gfRealSetPoint(frame, o.absolute.point, UIParent, o.absolute.relPoint, o.absolute.x, o.absolute.y)
+            end
         elseif GF.debugClicks then
             GF.Say("no captured original position to restore for " .. (frame:GetName() or "?"))
         end
