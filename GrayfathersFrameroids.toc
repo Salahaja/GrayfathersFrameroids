@@ -1,0 +1,7 @@
+## Interface: 11200
+## Version: 1.0.0
+## Title: Grayfather's Frameroids
+## Notes: Pull specific party/raid members' real unit frames out of your raid frame addon's grid and pin them wherever you want - tracks them by name across roster reshuffles.
+## Author: You
+## SavedVariablesPerCharacter: GF_Pins
+GrayfathersFrameroids.lua
