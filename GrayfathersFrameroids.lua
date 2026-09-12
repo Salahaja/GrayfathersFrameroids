@@ -21,10 +21,16 @@
 
     The fix (see PinFrame) is to replace the frame's own SetPoint method
     with a wrapper that redirects any position change back to our saved
-    spot - unless WE are the ones dragging it (frame.gfDragging), in which
-    case it passes through untouched so native StartMoving() tracking
-    still works. This is a per-frame-instance override (only shadows
-    SetPoint on that one Lua table), so it can't affect any other frame.
+    spot. This is a per-frame-instance override (only shadows SetPoint on
+    that one Lua table), so it can't affect any other frame. Our own
+    positioning goes through the captured real SetPoint (GF.ApplyPin), so
+    it bypasses the wrapper rather than fighting it.
+
+    Dragging is done by hand from cursor deltas (see GF.dragDriver) rather
+    than with StartMoving()/StopMovingOrSizing(), specifically so this
+    addon never causes the client to mark someone else's frame as "user
+    placed" - that flag outlives the addon entirely. The note above
+    dragDriver has the full story.
 
     "Original position" (what UnpinFrame restores) is captured TWO ways
     (see CaptureOriginalPoint): the frame's REAL current anchor (point,
@@ -125,15 +131,55 @@ end
 -- Pinning
 -- ---------------------------------------------------------------------------------------------
 
--- One-time per frame: lets it be dragged, and saves the new position when
--- you drop it. Doesn't touch existing scripts other than SetPoint (handled
--- separately in PinFrame) - dragging is a separate registration from
--- clicking, so normal targeting/menu behavior is unaffected.
+-- Applies a pin's saved position, going straight through the captured real
+-- SetPoint so it bypasses our own override.
+function GF.ApplyPin(frame)
+    local name = frame.gfPinnedFor
+    local p = name and GF.pins[name]
+    if not p or not frame.gfRealSetPoint then return end
+    frame.gfRealSetPoint(frame, p.point, UIParent, p.relPoint, p.x, p.y)
+end
+
+-- Dragging is driven manually from cursor deltas by this one frame that WE
+-- own, rather than by the built-in StartMoving()/StopMovingOrSizing().
+--
+-- That matters a lot: those built-ins make the client mark the frame as
+-- "user placed," and the client then persists that frame's position into
+-- WTF/Account/<acct>/<realm>/<char>/layout-cache.txt and restores it on
+-- every subsequent login - FOREVER, and completely outside this addon's
+-- control. It survives disabling the addon, deleting the addon, everything,
+-- because it's the client's own bookkeeping, not ours. Evidence that this
+-- is real: on this author's own install, PartyMemberFrame1-4 only ever
+-- appeared in layout-cache.txt on the characters where this addon had
+-- pinned party frames - never on characters that had merely been in a
+-- party. (PlayerFrame/TargetFrame appear on all of them, because
+-- ShaguTweaks' move-unitframes module deliberately calls SetUserPlaced on
+-- exactly those two.)
+--
+-- An addon has no business leaving permanent marks on frames it doesn't
+-- own, so this never calls SetMovable/StartMoving/StopMovingOrSizing at
+-- all. RegisterForDrag still gives us OnDragStart/OnDragStop (those work
+-- independently of movability); from there we just track the cursor
+-- ourselves and move the frame through our own positioning path.
+GF.dragDriver = CreateFrame("Frame")
+GF.dragDriver:Hide()
+GF.dragDriver:SetScript("OnUpdate", function()
+    local frame = GF.draggingFrame
+    local name = frame and frame.gfPinnedFor
+    local p = name and GF.pins[name]
+    if not p then this:Hide() return end
+
+    local px, py = GetCursorPosition()
+    local scale = UIParent:GetEffectiveScale()
+    p.x = GF.dragStartPinX + (px / scale - GF.dragStartCursorX)
+    p.y = GF.dragStartPinY + (py / scale - GF.dragStartCursorY)
+    GF.ApplyPin(frame)
+end)
+
 local function EnableDragging(frame)
     if frame.gfDragSetup then return end
     frame.gfDragSetup = true
 
-    frame:SetMovable(true)
     frame:RegisterForDrag("LeftButton")
 
     local origDragStart = frame:GetScript("OnDragStart")
@@ -142,19 +188,26 @@ local function EnableDragging(frame)
     frame:SetScript("OnDragStart", function()
         if GF.debugClicks then GF.Say("OnDragStart fired on " .. (this:GetName() or "?")) end
         if origDragStart then pcall(origDragStart) end
-        this.gfDragging = true
-        this:StartMoving()
+
+        local name = this.gfPinnedFor
+        local p = name and GF.pins[name]
+        if not p then return end
+
+        local px, py = GetCursorPosition()
+        local scale = UIParent:GetEffectiveScale()
+        GF.draggingFrame = this
+        GF.dragStartCursorX, GF.dragStartCursorY = px / scale, py / scale
+        GF.dragStartPinX, GF.dragStartPinY = p.x, p.y
+        GF.dragDriver:Show()
     end)
     frame:SetScript("OnDragStop", function()
         if GF.debugClicks then GF.Say("OnDragStop fired on " .. (this:GetName() or "?")) end
-        this.gfDragging = false
-        this:StopMovingOrSizing()
+        GF.dragDriver:Hide()
+        GF.draggingFrame = nil
         if origDragStop then pcall(origDragStop) end
 
         local name = this.gfPinnedFor
-        if name then
-            local point, _, relPoint, x, y = this:GetPoint()
-            GF.pins[name] = { point = point, relPoint = relPoint, x = x, y = y }
+        if name and GF.pins[name] then
             GF_Pins = GF.pins
         end
     end)
@@ -263,10 +316,6 @@ function GF.PinFrame(frame, name)
     frame.gfPinnedFor = name
 
     frame.SetPoint = function(self, ...)
-        if self.gfDragging then
-            self.gfRealSetPoint(self, ...)
-            return
-        end
         local p = GF.pins[self.gfPinnedFor]
         if p then
             self.gfRealSetPoint(self, p.point, UIParent, p.relPoint, p.x, p.y)
@@ -275,11 +324,7 @@ function GF.PinFrame(frame, name)
         end
     end
 
-    local p = GF.pins[name]
-    if p then
-        frame.gfRealSetPoint(frame, p.point, UIParent, p.relPoint, p.x, p.y)
-    end
-
+    GF.ApplyPin(frame)
     EnableDragging(frame)
 end
 
@@ -319,6 +364,25 @@ function GF.UnpinFrame(frame)
         end
     end
     frame.gfPinnedFor = nil
+    GF.ClearUserPlaced(frame)
+end
+
+-- Un-flags a frame as "user placed" so the client stops persisting its
+-- position to layout-cache.txt - see the long note above dragDriver for why
+-- that flag is the one piece of damage this addon could leave behind that
+-- outlives the addon itself. Newer versions never set it in the first
+-- place, but anyone who used an older version still has it stuck on their
+-- party frames, so this runs on release and via /gf cleanup to repair it.
+-- pcall because not every frame type necessarily implements these.
+function GF.ClearUserPlaced(frame)
+    if not frame.IsUserPlaced then return end
+    local ok, placed = pcall(frame.IsUserPlaced, frame)
+    if ok and placed and frame.SetUserPlaced then
+        pcall(frame.SetUserPlaced, frame, false)
+        if GF.debugClicks then
+            GF.Say("cleared user-placed flag on " .. (frame:GetName() or "?"))
+        end
+    end
 end
 
 function GF.TogglePin(name)
@@ -478,6 +542,28 @@ SlashCmdList["GRAYFATHERSFRAMEROIDS"] = function(msg)
         GF.heldFrames = {}
         GF_Pins = GF.pins
         GF.Say("reset - everyone released back to the grid.")
+    elseif cmd == "cleanup" then
+        -- Repairs the one bit of damage older versions of this addon could
+        -- leave behind - see GF.ClearUserPlaced.
+        local cleared = 0
+        local function sweep(prefix, lo, hi)
+            for i = lo, hi do
+                local f = getglobal(prefix .. i)
+                if f and f.IsUserPlaced then
+                    local ok, placed = pcall(f.IsUserPlaced, f)
+                    if ok and placed then
+                        GF.ClearUserPlaced(f)
+                        cleared = cleared + 1
+                    end
+                end
+            end
+        end
+        sweep("PartyMemberFrame", 1, 4)
+        sweep("ShaguTweaksRaidUnitFrame", 1, 40)
+        sweep("pfGroup", 0, 4)
+        sweep("pfRaid", 1, 40)
+        GF.Say("cleared the user-placed flag on " .. cleared .. " frame(s). Log out (not just /reloadui) " ..
+            "so the client rewrites layout-cache.txt without them.")
     elseif cmd == "clear" and arg2 ~= "" then
         if GF.pins[arg2] then
             GF.TogglePin(arg2)
@@ -524,7 +610,7 @@ SlashCmdList["GRAYFATHERSFRAMEROIDS"] = function(msg)
         GF.debugClicks = not GF.debugClicks
         GF.Say("click debugging: " .. (GF.debugClicks and "|cFF00FF7Fon|r - every click on a hooked frame will print here" or "|cFFFF5179off|r"))
     else
-        GF.Say("usage: /gf, /gf clear <name>, /gf reset, /gf probe, /gf debug")
+        GF.Say("usage: /gf, /gf clear <name>, /gf reset, /gf cleanup, /gf probe, /gf debug")
     end
 end
 
