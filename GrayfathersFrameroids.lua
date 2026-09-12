@@ -295,34 +295,53 @@ function GF.SnapshotAllFramePositions()
     end)
 end
 
--- [pinnedFrame] = { frames that were anchored to it and had to be cut loose }
+-- [pinnedFrame] = { sibling frames that were frozen in place for its sake }
 GF.detachedBy = {}
 
 -- Blizzard's default party frames hang off each other - frame 2 is anchored
 -- to frame 1, 3 to 2, and so on - so moving one drags every frame below it
 -- along with it. Pull out one person and the whole stack follows them.
 --
--- So before moving a frame, anything anchored TO it gets re-anchored to its
--- own current screen position instead, which cuts the chain and leaves it
--- sitting exactly where it already was. Only direct dependents need this:
--- once frame 2 is holding still on its own, frame 3 (anchored to 2) stays
--- put by itself. ReattachDependents puts the chain back on release.
+-- The obvious fix is "find whatever is anchored to this frame and cut just
+-- that loose," but that relies on GetPoint()'s relativeTo matching the frame
+-- object exactly, and in practice it didn't catch the chain (an anchor can
+-- point at a child region, or be two steps removed). So this takes the
+-- deterministic route instead: freeze EVERY sibling in the same frame set at
+-- its own current screen position before moving anything. A frame anchored
+-- to a sibling that isn't moving doesn't move either, no matter how the
+-- chain is actually wired. ReattachDependents puts them all back on release.
 function GF.DetachDependents(frame)
     local detached = {}
-    GF.ForEachCandidateFrame(function(other)
-        if other == frame or other.gfPinnedFor then return end
-        local _, relativeTo = other:GetPoint()
-        if relativeTo ~= frame then return end
 
-        local cap = CaptureOriginalPoint(other)
-        if not cap or not cap.absolute then return end
-        other:ClearAllPoints()
-        other:SetPoint(cap.absolute.point, UIParent, cap.absolute.relPoint, cap.absolute.x, cap.absolute.y)
-        table.insert(detached, other)
-        if GF.debugClicks then
-            GF.Say("detached " .. (other:GetName() or "?") .. " so it won't follow " .. (frame:GetName() or "?"))
+    -- Which set does this frame belong to? Only siblings can be chained to it.
+    local frameName = frame:GetName()
+    local mySet
+    if frameName then
+        for _, set in ipairs(GF.FRAME_SETS) do
+            if string.find(frameName, "^" .. set.prefix) then mySet = set break end
         end
-    end)
+    end
+    if not mySet then
+        GF.detachedBy[frame] = detached
+        return
+    end
+
+    for i = mySet.lo, mySet.hi do
+        local other = getglobal(mySet.prefix .. i)
+        if other and other ~= frame and not other.gfPinnedFor then
+            local cap = CaptureOriginalPoint(other)
+            if cap and cap.absolute then
+                other:ClearAllPoints()
+                other:SetPoint(cap.absolute.point, UIParent, cap.absolute.relPoint, cap.absolute.x, cap.absolute.y)
+                table.insert(detached, other)
+                if GF.debugClicks then
+                    GF.Say("froze " .. (other:GetName() or "?") .. " in place so it won't follow " ..
+                        (frame:GetName() or "?"))
+                end
+            end
+        end
+    end
+
     GF.detachedBy[frame] = detached
 end
 
@@ -334,7 +353,12 @@ function GF.ReattachDependents(frame)
         -- deliberately somewhere else now and shouldn't be yanked back.
         if not other.gfPinnedFor then
             local snap = other:GetName() and GF.knownOriginalPositions[other:GetName()]
-            if snap and snap.raw then
+            local rel = snap and snap.raw and snap.raw.relativeTo
+            -- Also leave it frozen if the frame its anchor points AT is
+            -- itself currently pulled out - reattaching would fling this one
+            -- across the screen to chase a frame that's deliberately
+            -- somewhere else. It'll get reattached when that pin is released.
+            if snap and snap.raw and not (rel and rel.gfPinnedFor) then
                 other:ClearAllPoints()
                 pcall(other.SetPoint, other, snap.raw.point, snap.raw.relativeTo, snap.raw.relPoint, snap.raw.x, snap.raw.y)
             end
