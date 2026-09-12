@@ -103,18 +103,40 @@ end
 -- order every time, and returns whichever real frame currently represents
 -- `name` - or nil if none of them do right now (they're not in your group,
 -- or you don't have a raid-frame addon showing them at all).
+--
+-- A VISIBLE frame always wins over a hidden one, and that is the entire
+-- reason this isn't just four early-returning loops. Blizzard's
+-- PartyMemberFrame1-4 exist in every session whether or not anything draws
+-- them: pfUI and ShaguTweaks' raid frames don't delete them, they hide them
+-- and draw their own. Returning the first frame whose UNIT matched therefore
+-- handed back a hidden Blizzard frame for anyone in your own subgroup, and
+-- the pin attached to something invisible - which looks exactly like "it
+-- said pulled out but nothing moved." Only if nothing visible represents
+-- them do we fall back to a hidden frame (a pin re-applying itself right
+-- after a reload, before the host addon has shown anything yet).
 function GF.FindFrameFor(name)
+    local hiddenFallback
+
+    local function consider(frame)
+        if not frame then return nil end
+        if frame:IsShown() then return frame end
+        if not hiddenFallback then hiddenFallback = frame end
+        return nil
+    end
+
     for i = 1, 4 do
         local unit = "party" .. i
         if UnitExists(unit) and UnitName(unit) == name then
-            return getglobal("PartyMemberFrame" .. i)
+            local frame = consider(getglobal("PartyMemberFrame" .. i))
+            if frame then return frame end
         end
     end
 
     for i = 1, 40 do
         local frame = getglobal("ShaguTweaksRaidUnitFrame" .. i)
         if frame and frame.unitstr and UnitExists(frame.unitstr) and UnitName(frame.unitstr) == name then
-            return frame
+            frame = consider(frame)
+            if frame then return frame end
         end
     end
 
@@ -123,7 +145,8 @@ function GF.FindFrameFor(name)
         if frame and frame.label and frame.id then
             local unit = frame.label .. frame.id
             if UnitExists(unit) and UnitName(unit) == name then
-                return frame
+                frame = consider(frame)
+                if frame then return frame end
             end
         end
     end
@@ -133,12 +156,13 @@ function GF.FindFrameFor(name)
         if frame and frame.label and frame.id then
             local unit = frame.label .. frame.id
             if UnitExists(unit) and UnitName(unit) == name then
-                return frame
+                frame = consider(frame)
+                if frame then return frame end
             end
         end
     end
 
-    return nil
+    return hiddenFallback
 end
 
 -- The reverse of FindFrameFor: which unit does this frame currently show?

@@ -1,4 +1,4 @@
-# Grayfather's Frameroids (v1.2.0)
+# Grayfather's Frameroids (v1.2.1)
 
 For tanks and healers: pull a specific party/raid member's **real** unit frame out of whatever raid-frame addon draws it, and pin it anywhere on screen. It's the actual frame - not a copy - so everything about it (health/mana bars, debuffs, click-to-target, right-click menu) works exactly as it always did. Once pinned, it keeps tracking that person by name even if the raid reshuffles them into a different subgroup.
 
@@ -85,6 +85,21 @@ You can confirm it worked by checking that file — there should be no `PartyMem
 - Shift-right-click is the only way to pull someone out right now - there's no roster-list picker.
 - Pins and stack positions are per-character (`SavedVariablesPerCharacter`), since a tank and a healer on the same account will likely want different setups.
 - Reordering rearranges frames within one raid-frame system at a time, using that system's own slot positions. It can't move someone from, say, a pfUI raid frame into the Blizzard party stack.
+
+## Development
+
+`tools/` holds a test harness that runs this addon's layout logic on a desktop Lua, outside the game. It isn't shipped in the release zip and the client never loads it.
+
+```
+lua tools/vanilla_lint.lua GrayfathersFrameroids.lua
+lua tools/test_ordering.lua
+```
+
+**`vanilla_lint.lua`** checks the source against what 1.12 actually runs. This matters because the Lua you can install today is 5.4 and vanilla runs 5.0: the `#` length operator, `%` modulo, `goto`, integer division and bitwise operators all parse perfectly under 5.4 and then throw a script error in-game. A clean `luac -p` only rules out typos, not that. It also flags later-version standard library and WoW API calls (`string.match`, `hooksecurefunc`, `SetShown`, ...), which are runtime errors and would otherwise surface only when that exact code path runs.
+
+**`wow_stub.lua`** implements enough of the client to load the addon, including frames with **real anchor geometry** - `SetPoint`/`GetPoint`/`GetLeft`/`GetTop` resolve through the anchor chain the way the client does, and `SetPoint` *adds* an anchor rather than replacing one unless the point name matches, exactly like the real thing. That fidelity is the point: this addon's whole job is moving frames and reading where they landed, so a mock with stubbed geometry would test nothing.
+
+**`test_ordering.lua`** runs the layout against a mock party and checks who ends up where. Every case in it was a real bug at some point - gaps closing behind a pulled-out member, fixed positions, contested positions, `BOTTOMLEFT`-anchored (pfUI-style) frames, and handing the stack back to its owner afterwards. It takes an optional path argument so a deliberately-broken copy can be tested without touching the real file, which is how the suite gets checked for teeth.
 
 ## Author
 
