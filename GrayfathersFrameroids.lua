@@ -398,9 +398,14 @@ function GF.TogglePin(name)
         end
         GF.Say(name .. " released back to the grid.")
     else
+        -- Drop new pins in the middle of the screen rather than the top-left
+        -- corner: that corner is where PlayerFrame lives, so a freshly
+        -- pulled-out frame landed underneath it and looked like it had just
+        -- vanished. Each additional pin cascades down from center so several
+        -- pulled out at once don't sit exactly on top of each other either.
         local count = 0
         for _ in pairs(GF.pins) do count = count + 1 end
-        GF.pins[name] = { point = "TOPLEFT", relPoint = "TOPLEFT", x = 20, y = -20 - (count * 40) }
+        GF.pins[name] = { point = "CENTER", relPoint = "CENTER", x = 0, y = -(count * 50) }
         GF_Pins = GF.pins
         GF.Say(name .. " pulled out - drag to move, shift-right-click their frame again to release.")
         GF.RefreshPins()

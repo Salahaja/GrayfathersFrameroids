@@ -1,4 +1,4 @@
-# Grayfather's Frameroids (v1.0.5)
+# Grayfather's Frameroids (v1.0.6)
 
 For tanks and healers: pull a specific party/raid member's **real** unit frame out of whatever raid-frame addon draws it, and pin it anywhere on screen. It's the actual frame - not a copy - so everything about it (health/mana bars, debuffs, click-to-target, right-click menu) works exactly as it always did. Once pinned, it keeps tracking that person by name even if the raid reshuffles them into a different subgroup.
 
