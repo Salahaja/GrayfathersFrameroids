@@ -1,4 +1,4 @@
-# Grayfather's Frameroids (v1.0.7)
+# Grayfather's Frameroids (v1.0.8)
 
 For tanks and healers: pull a specific party/raid member's **real** unit frame out of whatever raid-frame addon draws it, and pin it anywhere on screen. It's the actual frame - not a copy - so everything about it (health/mana bars, debuffs, click-to-target, right-click menu) works exactly as it always did. Once pinned, it keeps tracking that person by name even if the raid reshuffles them into a different subgroup.
 
@@ -9,6 +9,8 @@ None of the raid-frame addons this hooks into know or care that their frame got 
 Dragging is handled by tracking the cursor manually rather than with WoW's built-in `StartMoving()`/`StopMovingOrSizing()`, deliberately - see the cleanup note below for why that distinction matters.
 
 Because the frame is tracked by the person's **name**, not their raid slot, a reshuffle that moves them to a different subgroup (and therefore a different physical frame object) gets detected and the pin silently transfers to whichever frame now represents them - the old one goes back to normal grid behavior.
+
+There's one more wrinkle with Blizzard's default party frames specifically: they hang off each other (frame 2 is anchored to frame 1, 3 to 2, and so on), so moving one would normally drag every frame below it along too - pull out one person and the whole stack follows. Before moving a frame, anything anchored to it gets quietly re-anchored to its own current screen position, which cuts the chain and leaves the rest of the party exactly where it was. Releasing the pin hooks the chain back up.
 
 ## Supported raid-frame addons
 

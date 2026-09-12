@@ -270,18 +270,77 @@ end
 -- prefers this over capturing fresh at pin-time for exactly that reason.
 GF.knownOriginalPositions = {}
 
+GF.FRAME_SETS = {
+    { prefix = "PartyMemberFrame",        lo = 1, hi = 4 },
+    { prefix = "ShaguTweaksRaidUnitFrame", lo = 1, hi = 40 },
+    { prefix = "pfGroup",                 lo = 0, hi = 4 },
+    { prefix = "pfRaid",                  lo = 1, hi = 40 },
+}
+
+function GF.ForEachCandidateFrame(fn)
+    for _, set in ipairs(GF.FRAME_SETS) do
+        for i = set.lo, set.hi do
+            local name = set.prefix .. i
+            local frame = getglobal(name)
+            if frame then fn(frame, name) end
+        end
+    end
+end
+
 function GF.SnapshotAllFramePositions()
-    local function snap(name)
+    GF.ForEachCandidateFrame(function(frame, name)
         if GF.knownOriginalPositions[name] then return end
-        local frame = getglobal(name)
-        if not frame then return end
         local p = CaptureOriginalPoint(frame)
         if p then GF.knownOriginalPositions[name] = p end
+    end)
+end
+
+-- [pinnedFrame] = { frames that were anchored to it and had to be cut loose }
+GF.detachedBy = {}
+
+-- Blizzard's default party frames hang off each other - frame 2 is anchored
+-- to frame 1, 3 to 2, and so on - so moving one drags every frame below it
+-- along with it. Pull out one person and the whole stack follows them.
+--
+-- So before moving a frame, anything anchored TO it gets re-anchored to its
+-- own current screen position instead, which cuts the chain and leaves it
+-- sitting exactly where it already was. Only direct dependents need this:
+-- once frame 2 is holding still on its own, frame 3 (anchored to 2) stays
+-- put by itself. ReattachDependents puts the chain back on release.
+function GF.DetachDependents(frame)
+    local detached = {}
+    GF.ForEachCandidateFrame(function(other)
+        if other == frame or other.gfPinnedFor then return end
+        local _, relativeTo = other:GetPoint()
+        if relativeTo ~= frame then return end
+
+        local cap = CaptureOriginalPoint(other)
+        if not cap or not cap.absolute then return end
+        other:ClearAllPoints()
+        other:SetPoint(cap.absolute.point, UIParent, cap.absolute.relPoint, cap.absolute.x, cap.absolute.y)
+        table.insert(detached, other)
+        if GF.debugClicks then
+            GF.Say("detached " .. (other:GetName() or "?") .. " so it won't follow " .. (frame:GetName() or "?"))
+        end
+    end)
+    GF.detachedBy[frame] = detached
+end
+
+function GF.ReattachDependents(frame)
+    local detached = GF.detachedBy[frame]
+    if not detached then return end
+    for _, other in ipairs(detached) do
+        -- Skip any that have since been pinned in their own right - they're
+        -- deliberately somewhere else now and shouldn't be yanked back.
+        if not other.gfPinnedFor then
+            local snap = other:GetName() and GF.knownOriginalPositions[other:GetName()]
+            if snap and snap.raw then
+                other:ClearAllPoints()
+                pcall(other.SetPoint, other, snap.raw.point, snap.raw.relativeTo, snap.raw.relPoint, snap.raw.x, snap.raw.y)
+            end
+        end
     end
-    for i = 1, 4 do snap("PartyMemberFrame" .. i) end
-    for i = 1, 40 do snap("ShaguTweaksRaidUnitFrame" .. i) end
-    for i = 0, 4 do snap("pfGroup" .. i) end
-    for i = 1, 40 do snap("pfRaid" .. i) end
+    GF.detachedBy[frame] = nil
 end
 
 -- Takes over `frame`'s positioning so the host raid-frame addon's own
@@ -332,6 +391,10 @@ function GF.PinFrame(frame, name)
         end
     end
 
+    -- Cut loose anything anchored to this frame BEFORE moving it, or the
+    -- whole stack below it comes along for the ride.
+    GF.DetachDependents(frame)
+
     GF.ApplyPin(frame)
     EnableDragging(frame)
 end
@@ -378,6 +441,9 @@ function GF.UnpinFrame(frame)
     end
     frame.gfPinnedFor = nil
     GF.ClearUserPlaced(frame)
+    -- This frame is back where it belongs, so anything that used to hang off
+    -- it can be re-hooked to it again.
+    GF.ReattachDependents(frame)
 end
 
 -- Un-flags a frame as "user placed" so the client stops persisting its
