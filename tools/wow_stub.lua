@@ -60,6 +60,7 @@ end
 local frameMethods = {}
 
 function frameMethods:GetName() return self._name end
+function frameMethods:GetParent() return self._parent end
 function frameMethods:GetObjectType() return self._type end
 function frameMethods:IsShown() return self._shown and true or false end
 function frameMethods:IsVisible() return self._shown and true or false end
@@ -165,6 +166,15 @@ function frameMethods:GetBottom()
     return t and (t - self._h) or nil
 end
 
+-- Text and mouse state are recorded rather than discarded: a label's text IS
+-- the observable output of any addon that stamps numbers onto unit frames, and
+-- whether the mouse is enabled is how a lock/unlock edit mode is verified.
+function frameMethods:SetText(text) self._text = text end
+function frameMethods:GetText() return self._text end
+function frameMethods:EnableMouse(v) self._mouseEnabled = v and true or false end
+function frameMethods:IsMouseEnabled() return self._mouseEnabled and true or false end
+function frameMethods:GetFont() return "Fonts\\FRIZQT__.TTF", 10, "" end
+
 function frameMethods:SetScript(name, fn) self._scripts[name] = fn end
 function frameMethods:GetScript(name) return self._scripts[name] end
 function frameMethods:HasScript(name) return true end
@@ -190,9 +200,9 @@ end
 -- catch-all quietly broke all of them at once. Unknown keys must be nil.
 for _, name in ipairs({
     "SetBackdrop", "SetBackdropColor", "SetBackdropBorderColor", "SetTexture",
-    "SetTexCoord", "SetVertexColor", "SetAlpha", "GetAlpha", "SetText", "GetText",
+    "SetTexCoord", "SetVertexColor", "SetAlpha", "GetAlpha",
     "SetJustifyH", "SetFont", "SetFontObject", "SetTextColor", "SetShadowOffset",
-    "EnableMouse", "EnableMouseWheel", "SetToplevel", "SetClampedToScreen",
+    "EnableMouseWheel", "SetToplevel", "SetClampedToScreen",
     "StartMoving", "StopMovingOrSizing", "SetHitRectInsets", "SetNormalTexture",
     "SetHighlightTexture", "SetPushedTexture", "SetID", "SetParent", "SetAllPoints",
     "SetStatusBarTexture", "SetStatusBarColor", "SetMinMaxValues", "SetValue",
